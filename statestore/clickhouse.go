@@ -49,8 +49,9 @@ CREATE TABLE IF NOT EXISTS %s.alert_state (
     active_at     DateTime64(3),
     fired_at      Nullable(DateTime64(3)),
     resolved_at   Nullable(DateTime64(3)),
-    annotations   Map(String, String),
-    updated_at    DateTime64(3)
+    annotations        Map(String, String),
+    keep_firing_since  Nullable(DateTime64(3)),
+    updated_at         DateTime64(3)
 ) ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (rule_id, alert_hash)
 SETTINGS index_granularity = 256
@@ -91,6 +92,8 @@ func (s *Store) EnsureTables(ctx context.Context) error {
 	stmts := []string{
 		fmt.Sprintf(ddlAlertState, s.database),
 		fmt.Sprintf(ddlAlertHistory, s.database),
+		// Migration: add keep_firing_since column if missing (for upgrades from earlier schema).
+		fmt.Sprintf("ALTER TABLE %s.alert_state ADD COLUMN IF NOT EXISTS keep_firing_since Nullable(DateTime64(3)) AFTER annotations", s.database),
 	}
 	for _, stmt := range stmts {
 		if err := s.conn.Exec(ctx, stmt); err != nil {
@@ -115,7 +118,7 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 
 	now := time.Now()
 	for _, inst := range instances {
-		var firedAt, resolvedAt *time.Time
+		var firedAt, resolvedAt, keepFiringSince *time.Time
 		if !inst.FiredAt.IsZero() {
 			t := inst.FiredAt
 			firedAt = &t
@@ -123,6 +126,10 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 		if !inst.ResolvedAt.IsZero() {
 			t := inst.ResolvedAt
 			resolvedAt = &t
+		}
+		if !inst.KeepFiringSince.IsZero() {
+			t := inst.KeepFiringSince
+			keepFiringSince = &t
 		}
 
 		if err := batch.Append(
@@ -138,6 +145,7 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 			firedAt,
 			resolvedAt,
 			inst.Annotations,
+			keepFiringSince,
 			now,
 		); err != nil {
 			return fmt.Errorf("appending to batch: %w", err)
@@ -153,7 +161,8 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 		SELECT
 			rule_id, alert_hash, group_name, alert_name,
 			state, dimensions, value, expr,
-			active_at, fired_at, resolved_at, annotations
+			active_at, fired_at, resolved_at, annotations,
+			keep_firing_since
 		FROM %s.alert_state FINAL
 		WHERE state IN ('pending', 'firing')
 	`, s.database)
@@ -167,15 +176,17 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 	var instances []rule.AlertInstance
 	for rows.Next() {
 		var (
-			inst       rule.AlertInstance
-			stateStr   string
-			firedAt    *time.Time
-			resolvedAt *time.Time
+			inst            rule.AlertInstance
+			stateStr        string
+			firedAt         *time.Time
+			resolvedAt      *time.Time
+			keepFiringSince *time.Time
 		)
 		if err := rows.Scan(
 			&inst.RuleID, &inst.ID, &inst.GroupName, &inst.AlertName,
 			&stateStr, &inst.Labels, &inst.Value, &inst.Expr,
 			&inst.ActiveAt, &firedAt, &resolvedAt, &inst.Annotations,
+			&keepFiringSince,
 		); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
@@ -185,6 +196,9 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 		}
 		if resolvedAt != nil {
 			inst.ResolvedAt = *resolvedAt
+		}
+		if keepFiringSince != nil {
+			inst.KeepFiringSince = *keepFiringSince
 		}
 		instances = append(instances, inst)
 	}

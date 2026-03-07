@@ -169,7 +169,11 @@ func (am *AlertManager) buildPayload(alerts []rule.AlertInstance) ([]byte, error
 			aa.Status = "firing"
 			// EndsAt is set to a time in the future. Alertmanager uses this to
 			// auto-resolve if we stop sending. Convention: 4x evaluation interval.
-			aa.EndsAt = time.Now().Add(4 * time.Minute) // TODO: make configurable
+			delta := 4 * time.Minute
+			if a.EvaluationInterval > 0 {
+				delta = 4 * a.EvaluationInterval
+			}
+			aa.EndsAt = time.Now().Add(delta)
 		case rule.StateInactive:
 			aa.Status = "resolved"
 			aa.EndsAt = a.ResolvedAt

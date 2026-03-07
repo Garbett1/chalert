@@ -491,3 +491,128 @@ func TestDefaultLimitEnforced(t *testing.T) {
 		t.Logf("got expected error: %s", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: keep_firing_for with flapping data
+// ---------------------------------------------------------------------------
+
+func TestKeepFiringForFlappingData(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := chConn.Exec(ctx, "TRUNCATE TABLE http_requests"); err != nil {
+		t.Fatalf("truncate: %s", err)
+	}
+	webhook.reset()
+
+	// Phase 1: Seed error data to trigger alert.
+	if err := insertHTTPRequests(ctx, chConn, "flapper", 500, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertHTTPRequests(ctx, chConn, "flapper", 200, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	rulesPath, _ := filepath.Abs("testdata/keep_firing_for_rules.yaml")
+	groups, err := config.Parse([]string{rulesPath})
+	if err != nil {
+		t.Fatalf("parse: %s", err)
+	}
+
+	ch, err := chclient.New(chclient.Config{DSN: chDSN, MaxQueryTime: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+
+	qb := datasource.NewQuerierBuilder(ch.ReadConn())
+	am := notifier.New(notifier.Config{URLs: []string{amURL}})
+	store := statestore.New(ch.WriteConn(), "default")
+
+	g := rule.NewGroup(groups[0], qb, rule.GroupOptions{
+		DefaultInterval: 5 * time.Second,
+	})
+	go g.Start(ctx, am, store)
+	defer func() {
+		cancel()
+		g.Close()
+	}()
+
+	// Phase 2: Wait for alert to fire.
+	t.Log("waiting for flapper to fire...")
+	waitFor(t, 60*time.Second, time.Second, "flapper firing", func() bool {
+		for _, a := range webhook.getAlerts() {
+			if a.Status == "firing" && a.Labels["service"] == "flapper" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Phase 3: Remove error data (dilute below threshold).
+	t.Log("flapper recovering — diluting errors...")
+	if err := insertHTTPRequests(ctx, chConn, "flapper", 200, 5000); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alert should still fire for ~30s (keep_firing_for).
+	// Wait 10s and confirm still firing.
+	time.Sleep(10 * time.Second)
+	latestFiring := false
+	for _, a := range webhook.getAlerts() {
+		if a.Labels["service"] == "flapper" && a.Status == "firing" {
+			latestFiring = true
+		}
+	}
+	if !latestFiring {
+		t.Error("expected alert to still be firing within keep_firing_for window")
+	}
+
+	// Phase 4: Wait for resolution after keep_firing_for expires.
+	t.Log("waiting for flapper to resolve after keep_firing_for...")
+	waitFor(t, 60*time.Second, time.Second, "flapper resolved", func() bool {
+		alerts := webhook.getAlerts()
+		for _, a := range alerts {
+			if a.Labels["service"] == "flapper" && a.Status == "resolved" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Test: Eval timestamp parameter
+// ---------------------------------------------------------------------------
+
+func TestEvalTimestampParameter(t *testing.T) {
+	ctx := context.Background()
+
+	ch, err := chclient.New(chclient.Config{DSN: chDSN, MaxQueryTime: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+
+	qb := datasource.NewQuerierBuilder(ch.ReadConn())
+	querier := qb.BuildWithParams(datasource.QuerierParams{})
+
+	evalTS := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	res, err := querier.Query(ctx,
+		"SELECT {chalert_eval_ts:DateTime64(3)} AS ts, 1 AS value",
+		evalTS,
+	)
+	if err != nil {
+		t.Fatalf("query with eval timestamp parameter failed: %v", err)
+	}
+
+	if len(res.Data) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(res.Data))
+	}
+
+	// The timestamp in the result should match our eval timestamp.
+	gotTS := time.Unix(res.Data[0].Timestamps[0], 0).UTC()
+	if gotTS.Year() != 2025 || gotTS.Month() != 6 || gotTS.Day() != 15 {
+		t.Errorf("expected eval timestamp 2025-06-15, got %v", gotTS)
+	}
+}

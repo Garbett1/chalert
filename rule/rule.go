@@ -27,12 +27,15 @@
 package rule
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/garbett1/chalert/config"
@@ -108,6 +111,10 @@ type AlertInstance struct {
 
 	// For is the configured pending duration before firing.
 	For time.Duration
+
+	// EvaluationInterval is the group's evaluation interval, used by
+	// notifiers to compute EndsAt (4 × interval, matching vmalert).
+	EvaluationInterval time.Duration
 }
 
 // Notifier is the interface for sending alert notifications.
@@ -142,8 +149,9 @@ type AlertingRule struct {
 	groupName string
 	debug     bool
 
-	querier datasource.Querier
-	alerts  map[uint64]*AlertInstance
+	querier       datasource.Querier
+	groupInterval time.Duration
+	alerts        map[uint64]*AlertInstance
 
 	// lastEvaluation tracks recent evaluation state for debugging.
 	lastEval     time.Time
@@ -159,15 +167,16 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 		debug = *cfg.Debug
 	}
 	return &AlertingRule{
-		ruleID:    cfg.ID,
-		name:      cfg.Alert,
-		expr:      cfg.Expr,
-		forDur:    cfg.For.Duration(),
-		keepFire:  cfg.KeepFiringFor.Duration(),
-		labels:    cfg.Labels,
-		annTpls:   cfg.Annotations,
-		groupName: groupName,
-		debug:     debug,
+		ruleID:        cfg.ID,
+		name:          cfg.Alert,
+		expr:          cfg.Expr,
+		forDur:        cfg.For.Duration(),
+		keepFire:      cfg.KeepFiringFor.Duration(),
+		labels:        cfg.Labels,
+		annTpls:       cfg.Annotations,
+		groupName:     groupName,
+		groupInterval: groupInterval,
+		debug:         debug,
 		querier: qb.BuildWithParams(datasource.QuerierParams{
 			EvaluationInterval: groupInterval,
 			Debug:              debug,
@@ -303,6 +312,8 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 	}
 
 	if limit > 0 && numActive > limit {
+		// Match vmalert: clear all alerts when limit is exceeded.
+		ar.alerts = make(map[uint64]*AlertInstance)
 		return nil, fmt.Errorf("rule %q: exceeded limit of %d with %d active alerts", ar.name, limit, numActive)
 	}
 
@@ -319,7 +330,9 @@ func (ar *AlertingRule) alertsToSend(ts time.Time) []AlertInstance {
 		// Send firing alerts, and recently resolved alerts
 		if a.State == StateFiring || (a.State == StateInactive && !a.ResolvedAt.IsZero()) {
 			a.LastSent = ts
-			out = append(out, *a)
+			inst := *a
+			inst.EvaluationInterval = ar.groupInterval
+			out = append(out, inst)
 		}
 	}
 	return out
@@ -348,46 +361,70 @@ func (ar *AlertingRule) buildLabels(m datasource.Metric) map[string]string {
 	return labels
 }
 
-// renderAnnotations renders annotation templates for an alert.
-// For now this does simple variable substitution; full Go template support is future work.
-func (ar *AlertingRule) renderAnnotations(m datasource.Metric, existing *AlertInstance) map[string]string {
+// annotationData is the template context available in annotation templates.
+// Supports both Go template syntax (.Labels.X, .Value, .Expr) and legacy
+// vmalert-compatible $labels/$value variables.
+type annotationData struct {
+	Labels map[string]string
+	Value  float64
+	Expr   string
+}
+
+// renderAnnotations renders annotation templates for an alert using text/template.
+// Templates can use .Labels.key, .Value, .Expr, and the legacy {{ $labels.key }} / {{ $value }}.
+func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance) map[string]string {
 	if len(ar.annTpls) == 0 {
 		return nil
 	}
+
+	labels := make(map[string]string, len(m.Labels))
+	for _, l := range m.Labels {
+		labels[l.Name] = l.Value
+	}
+
+	var value float64
+	if len(m.Values) > 0 {
+		value = m.Values[0]
+	}
+
+	data := annotationData{
+		Labels: labels,
+		Value:  value,
+		Expr:   ar.expr,
+	}
+
 	out := make(map[string]string, len(ar.annTpls))
 	for k, tpl := range ar.annTpls {
-		rendered := tpl
-		// Simple substitution for common patterns
-		for _, l := range m.Labels {
-			rendered = replaceAll(rendered, "{{ $labels."+l.Name+" }}", l.Value)
-			rendered = replaceAll(rendered, "{{$labels."+l.Name+"}}", l.Value)
+		// Rewrite legacy {{ $labels.X }} and {{ $value }} to Go template syntax.
+		normalized := normalizeLegacyTemplate(tpl)
+
+		t, err := template.New(k).Option("missingkey=zero").Parse(normalized)
+		if err != nil {
+			// Fall back to raw template on parse error.
+			slog.Warn("chalert annotation template parse error",
+				"rule", ar.name, "key", k, "error", err)
+			out[k] = tpl
+			continue
 		}
-		if len(m.Values) > 0 {
-			rendered = replaceAll(rendered, "{{ $value }}", fmt.Sprintf("%g", m.Values[0]))
-			rendered = replaceAll(rendered, "{{$value}}", fmt.Sprintf("%g", m.Values[0]))
+
+		var buf bytes.Buffer
+		if err := t.Execute(&buf, data); err != nil {
+			slog.Warn("chalert annotation template exec error",
+				"rule", ar.name, "key", k, "error", err)
+			out[k] = tpl
+			continue
 		}
-		out[k] = rendered
+		out[k] = buf.String()
 	}
 	return out
 }
 
-func replaceAll(s, old, new string) string {
-	for {
-		i := indexOf(s, old)
-		if i < 0 {
-			return s
-		}
-		s = s[:i] + new + s[i+len(old):]
-	}
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
+// normalizeLegacyTemplate rewrites vmalert-compatible {{ $labels.X }} and {{ $value }}
+// to Go template equivalents {{ .Labels.X }} and {{ .Value }}.
+func normalizeLegacyTemplate(s string) string {
+	s = strings.ReplaceAll(s, "$labels.", ".Labels.")
+	s = strings.ReplaceAll(s, "$value", ".Value")
+	return s
 }
 
 func hashLabels(labels map[string]string) uint64 {

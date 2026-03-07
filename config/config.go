@@ -20,6 +20,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -124,17 +125,87 @@ func (r *Rule) Validate() error {
 
 	// Basic SQL sanity checks. Full validation requires a CH connection.
 	exprUpper := strings.ToUpper(strings.TrimSpace(r.Expr))
-	if !strings.HasPrefix(exprUpper, "SELECT") {
-		return fmt.Errorf("'expr' must be a SELECT statement, got: %.40s...", r.Expr)
+	if !strings.HasPrefix(exprUpper, "SELECT") && !strings.HasPrefix(exprUpper, "WITH") {
+		return fmt.Errorf("'expr' must be a SELECT or WITH statement, got: %.40s...", r.Expr)
 	}
 
 	return nil
 }
 
+// normalizeExpr collapses whitespace in an expression so that cosmetic
+// reformatting (e.g. YAML block scalar differences) does not change the hash.
+func normalizeExpr(expr string) string {
+	return strings.Join(strings.Fields(expr), " ")
+}
+
 // HashRule computes a unique identity hash for a rule.
 func HashRule(r Rule) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(r.Expr))
+	h.Write([]byte(normalizeExpr(r.Expr)))
+	if r.Record != "" {
+		h.Write([]byte("recording"))
+		h.Write([]byte(r.Record))
+	} else {
+		h.Write([]byte("alerting"))
+		h.Write([]byte(r.Alert))
+	}
+	kv := sortedMapEntries(r.Labels)
+	for _, e := range kv {
+		h.Write([]byte(e.key))
+		h.Write([]byte(e.value))
+		h.Write([]byte("\xff"))
+	}
+	return h.Sum64()
+}
+
+// NormalizeRuleIDs replaces parse-time rule IDs with IDs derived from
+// ClickHouse's normalizedQueryHashKeepNames function for the expression
+// component. This provides CH-native query normalization (whitespace,
+// comments, literal placeholding) so that cosmetic edits to expressions
+// don't change rule identity.
+//
+// The queryHash function should call:
+//
+//	SELECT normalizedQueryHashKeepNames(expr)
+//
+// and return the UInt64 result.
+//
+// NormalizeRuleIDs also re-validates uniqueness after normalization,
+// since CH normalization may merge previously-distinct expressions.
+func NormalizeRuleIDs(groups []Group, queryHash func(expr string) (uint64, error)) error {
+	cache := make(map[string]uint64)
+	for i := range groups {
+		seen := make(map[uint64]string)
+		for j := range groups[i].Rules {
+			r := &groups[i].Rules[j]
+			chHash, ok := cache[r.Expr]
+			if !ok {
+				var err error
+				chHash, err = queryHash(r.Expr)
+				if err != nil {
+					return fmt.Errorf("rule %q in group %q: failed to normalize expr: %w",
+						r.Name(), groups[i].Name, err)
+				}
+				cache[r.Expr] = chHash
+			}
+			r.ID = hashRuleWithExprHash(chHash, *r)
+			if prev, dup := seen[r.ID]; dup {
+				return fmt.Errorf("group %q: rules %q and %q have the same normalized identity",
+					groups[i].Name, prev, r.Name())
+			}
+			seen[r.ID] = r.Name()
+		}
+	}
+	return nil
+}
+
+// hashRuleWithExprHash computes a rule ID using a pre-computed expression
+// hash (from ClickHouse) combined with the rule name and labels.
+func hashRuleWithExprHash(exprHash uint64, r Rule) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], exprHash)
+	h.Write(buf[:])
 	if r.Record != "" {
 		h.Write([]byte("recording"))
 		h.Write([]byte(r.Record))

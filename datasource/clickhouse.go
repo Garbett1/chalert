@@ -30,6 +30,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
@@ -285,9 +286,9 @@ func derefToTime(v any) (time.Time, bool) {
 }
 
 func withEvalTimestamp(ctx context.Context, ts time.Time) context.Context {
-	// clickhouse-go supports named parameters via context
-	// This allows queries to reference {chalert_eval_ts:DateTime64(3)}
-	return ctx // TODO: implement via clickhouse.WithParameters when needed
+	return clickhouse.Context(ctx, clickhouse.WithParameters(clickhouse.Parameters{
+		"chalert_eval_ts": ts.Format("2006-01-02 15:04:05.000"),
+	}))
 }
 
 func truncate(s string, n int) string {

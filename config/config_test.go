@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,6 +234,167 @@ func TestHashRuleDeterminism(t *testing.T) {
 	r2.Expr = "SELECT 2 AS value"
 	if HashRule(r2) == h1 {
 		t.Error("different expressions should produce different hashes")
+	}
+}
+
+func TestNormalizeRuleIDs(t *testing.T) {
+	// Simulate a CH-based query hash that normalizes whitespace and literals.
+	fakeQueryHash := func(expr string) (uint64, error) {
+		// Simple simulation: hash only the non-whitespace tokens
+		// (real CH also normalizes literals, but this suffices for testing)
+		normalized := strings.Join(strings.Fields(expr), " ")
+		h := uint64(0)
+		for _, b := range []byte(normalized) {
+			h = h*31 + uint64(b)
+		}
+		return h, nil
+	}
+
+	groups := []Group{
+		{
+			Name: "g1",
+			Rules: []Rule{
+				{Alert: "A", Expr: "SELECT 1 AS value", ID: 1},
+				{Alert: "B", Expr: "SELECT 2 AS value", ID: 2},
+			},
+		},
+	}
+
+	err := NormalizeRuleIDs(groups, fakeQueryHash)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// IDs should have been recomputed (different from the originals)
+	if groups[0].Rules[0].ID == 1 {
+		t.Error("expected rule A ID to be recomputed")
+	}
+	if groups[0].Rules[1].ID == 2 {
+		t.Error("expected rule B ID to be recomputed")
+	}
+	// IDs should be different from each other
+	if groups[0].Rules[0].ID == groups[0].Rules[1].ID {
+		t.Error("expected different IDs for different rules")
+	}
+}
+
+func TestNormalizeRuleIDs_DuplicateDetection(t *testing.T) {
+	// A query hash that always returns the same value (simulates
+	// normalizedQueryHashKeepNames merging two exprs that differ
+	// only in literal values).
+	constantHash := func(expr string) (uint64, error) {
+		return 42, nil
+	}
+
+	groups := []Group{
+		{
+			Name: "g1",
+			Rules: []Rule{
+				{Alert: "SameName", Expr: "SELECT 1 AS value", ID: 1},
+				{Alert: "SameName", Expr: "SELECT 2 AS value", ID: 2},
+			},
+		},
+	}
+
+	err := NormalizeRuleIDs(groups, constantHash)
+	if err == nil {
+		t.Fatal("expected duplicate detection error, got nil")
+	}
+	if !strings.Contains(err.Error(), "same normalized identity") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeRuleIDs_DifferentNamesSameExprOK(t *testing.T) {
+	// Same expr hash but different names should produce different rule IDs.
+	constantHash := func(expr string) (uint64, error) {
+		return 42, nil
+	}
+
+	groups := []Group{
+		{
+			Name: "g1",
+			Rules: []Rule{
+				{Alert: "AlertA", Expr: "SELECT 1 AS value"},
+				{Alert: "AlertB", Expr: "SELECT 1 AS value"},
+			},
+		},
+	}
+
+	err := NormalizeRuleIDs(groups, constantHash)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if groups[0].Rules[0].ID == groups[0].Rules[1].ID {
+		t.Error("different alert names should produce different IDs even with same expr hash")
+	}
+}
+
+func TestHashRuleNormalization(t *testing.T) {
+	// Same query with different whitespace should produce the same hash.
+	r1 := Rule{
+		Alert: "TestAlert",
+		Expr:  "SELECT service, count() AS value FROM http_requests GROUP BY service",
+	}
+	r2 := Rule{
+		Alert: "TestAlert",
+		Expr: `SELECT   service,
+			count() AS   value
+		FROM http_requests
+		GROUP BY service`,
+	}
+	r3 := Rule{
+		Alert: "TestAlert",
+		Expr:  "  SELECT service, count() AS value FROM http_requests GROUP BY service  \n",
+	}
+
+	h1 := HashRule(r1)
+	h2 := HashRule(r2)
+	h3 := HashRule(r3)
+
+	if h1 != h2 {
+		t.Errorf("multiline whitespace changed hash: %d != %d", h1, h2)
+	}
+	if h1 != h3 {
+		t.Errorf("leading/trailing whitespace changed hash: %d != %d", h1, h3)
+	}
+
+	// Semantically different query should still produce different hash.
+	r4 := Rule{
+		Alert: "TestAlert",
+		Expr:  "SELECT service, count() AS value FROM http_requests GROUP BY service HAVING value > 0.1",
+	}
+	if HashRule(r4) == h1 {
+		t.Error("different queries should produce different hashes")
+	}
+}
+
+func TestParseValidCTEExpression(t *testing.T) {
+	yaml := `
+groups:
+  - name: cte-test
+    rules:
+      - alert: CTEAlert
+        expr: |
+          WITH cte AS (
+              SELECT service, count() AS cnt
+              FROM http_requests
+              GROUP BY service
+          )
+          SELECT service, cnt AS value FROM cte WHERE cnt > 100
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, err := Parse([]string{path})
+	if err != nil {
+		t.Fatalf("CTE expression should be valid, got error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Rules) != 1 {
+		t.Fatalf("expected 1 group with 1 rule, got %d groups", len(groups))
 	}
 }
 

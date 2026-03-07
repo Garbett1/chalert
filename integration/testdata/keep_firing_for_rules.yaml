@@ -1,0 +1,19 @@
+groups:
+  - name: keep-firing-test
+    interval: 5s
+    rules:
+      - alert: FlappingAlert
+        expr: |
+          SELECT
+              service,
+              countIf(status >= 500) / count() AS value
+          FROM http_requests
+          WHERE timestamp > now() - INTERVAL 1 MINUTE
+          GROUP BY service
+          HAVING value > 0.05
+        for: 5s
+        keep_firing_for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Flapping error rate {{ .Labels.service }}"

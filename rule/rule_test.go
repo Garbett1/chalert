@@ -314,3 +314,241 @@ func TestAlertingRule_KeepFiringFor(t *testing.T) {
 		t.Error("expected alert to stop firing after keep_firing_for elapsed")
 	}
 }
+
+func TestKeepFiringFor_ReMatchResetsTimer(t *testing.T) {
+	matchData := datasource.Result{
+		Data: []datasource.Metric{
+			{
+				Labels:     []datasource.Label{{Name: "x", Value: "1"}},
+				Values:     []float64{1},
+				Timestamps: []int64{time.Now().Unix()},
+			},
+		},
+	}
+	noData := datasource.Result{Data: nil}
+
+	q := &fakeQuerier{results: matchData}
+	qb := &fakeQuerierBuilder{q: q}
+
+	r := NewAlertingRule(qb, "g", time.Minute, config.Rule{
+		Alert:         "ReMatchTest",
+		Expr:          "SELECT '1' AS x, 1 AS value",
+		KeepFiringFor: config.Duration{D: 5 * time.Minute},
+		ID:            555,
+	})
+
+	now := time.Now()
+
+	// Fire the alert
+	_, err := r.Exec(context.Background(), now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove data — starts keep_firing_for
+	q.results = noData
+	_, err = r.Exec(context.Background(), now.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify KeepFiringSince is set
+	allAlerts := r.GetAlerts()
+	if len(allAlerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
+	}
+	if allAlerts[0].KeepFiringSince.IsZero() {
+		t.Fatal("expected KeepFiringSince to be set")
+	}
+
+	// Re-match before keep_firing_for expires
+	q.results = matchData
+	_, err = r.Exec(context.Background(), now.Add(2*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// KeepFiringSince should be reset to zero
+	allAlerts = r.GetAlerts()
+	if len(allAlerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
+	}
+	if !allAlerts[0].KeepFiringSince.IsZero() {
+		t.Errorf("expected KeepFiringSince to be reset to zero after re-match, got %v", allAlerts[0].KeepFiringSince)
+	}
+	if allAlerts[0].State != StateFiring {
+		t.Errorf("expected Firing state, got %s", allAlerts[0].State)
+	}
+
+	// Remove data again — new keep_firing_for window
+	q.results = noData
+	_, err = r.Exec(context.Background(), now.Add(3*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allAlerts = r.GetAlerts()
+	if len(allAlerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
+	}
+	if allAlerts[0].KeepFiringSince.IsZero() {
+		t.Fatal("expected new KeepFiringSince to be set")
+	}
+
+	// Should still fire at +7m (only 4m into new keep_firing_for window)
+	alerts, err := r.Exec(context.Background(), now.Add(7*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firing := false
+	for _, a := range alerts {
+		if a.State == StateFiring {
+			firing = true
+		}
+	}
+	if !firing {
+		t.Error("expected alert to still be firing within new keep_firing_for window")
+	}
+
+	// Should resolve at +9m (6m into new keep_firing_for window > 5m)
+	alerts, err = r.Exec(context.Background(), now.Add(9*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillFiring := false
+	for _, a := range alerts {
+		if a.State == StateFiring {
+			stillFiring = true
+		}
+	}
+	if stillFiring {
+		t.Error("expected alert to resolve after new keep_firing_for window elapsed")
+	}
+}
+
+func TestKeepFiringFor_StatePreservedAcrossRestore(t *testing.T) {
+	matchData := datasource.Result{
+		Data: []datasource.Metric{
+			{
+				Labels:     []datasource.Label{{Name: "x", Value: "1"}},
+				Values:     []float64{1},
+				Timestamps: []int64{time.Now().Unix()},
+			},
+		},
+	}
+
+	q := &fakeQuerier{results: matchData}
+	qb := &fakeQuerierBuilder{q: q}
+
+	cfg := config.Rule{
+		Alert:         "RestoreTest",
+		Expr:          "SELECT '1' AS x, 1 AS value",
+		KeepFiringFor: config.Duration{D: 5 * time.Minute},
+		ID:            666,
+	}
+
+	r1 := NewAlertingRule(qb, "g", time.Minute, cfg)
+	now := time.Now()
+
+	// Fire the alert
+	_, err := r1.Exec(context.Background(), now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove data — enter keep_firing_for
+	q.results = datasource.Result{Data: nil}
+	_, err = r1.Exec(context.Background(), now.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the instances
+	instances := r1.GetAlerts()
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(instances))
+	}
+	if instances[0].KeepFiringSince.IsZero() {
+		t.Fatal("expected KeepFiringSince to be set before restore")
+	}
+
+	// Create a new rule and restore instances
+	r2 := NewAlertingRule(qb, "g", time.Minute, cfg)
+	r2.Restore(instances)
+
+	// Verify the restored alert still has KeepFiringSince
+	restored := r2.GetAlerts()
+	if len(restored) != 1 {
+		t.Fatalf("expected 1 restored alert, got %d", len(restored))
+	}
+	if restored[0].KeepFiringSince.IsZero() {
+		t.Error("expected KeepFiringSince to be preserved after restore")
+	}
+	if restored[0].State != StateFiring {
+		t.Errorf("expected Firing state after restore, got %s", restored[0].State)
+	}
+
+	// Exec with no data — should still be in keep_firing_for window
+	alerts, err := r2.Exec(context.Background(), now.Add(2*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firing := false
+	for _, a := range alerts {
+		if a.State == StateFiring {
+			firing = true
+		}
+	}
+	if !firing {
+		t.Error("expected alert to keep firing after restore within keep_firing_for window")
+	}
+}
+
+func TestAnnotationTemplates_FullGoTemplate(t *testing.T) {
+	q := &fakeQuerier{
+		results: datasource.Result{
+			Data: []datasource.Metric{
+				{
+					Labels:     []datasource.Label{{Name: "service", Value: "payments"}},
+					Values:     []float64{0.123456},
+					Timestamps: []int64{time.Now().Unix()},
+				},
+			},
+		},
+	}
+	qb := &fakeQuerierBuilder{q: q}
+
+	r := NewAlertingRule(qb, "g", time.Minute, config.Rule{
+		Alert: "TemplateTest",
+		Expr:  "SELECT 'payments' AS service, 0.123456 AS value",
+		Annotations: map[string]string{
+			"label_access": "{{ .Labels.service }}",
+			"formatted":    `{{ printf "%.2f" .Value }}`,
+			"expr":         "{{ .Expr }}",
+			"legacy":       "{{ $labels.service }} has value {{ $value }}",
+		},
+		ID: 777,
+	})
+
+	alerts, err := r.Exec(context.Background(), time.Now(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+
+	tests := map[string]string{
+		"label_access": "payments",
+		"formatted":    "0.12",
+		"expr":         "SELECT 'payments' AS service, 0.123456 AS value",
+		"legacy":       "payments has value 0.123456",
+	}
+
+	for key, want := range tests {
+		got := alerts[0].Annotations[key]
+		if got != want {
+			t.Errorf("annotation %q: want %q, got %q", key, want, got)
+		}
+	}
+}
