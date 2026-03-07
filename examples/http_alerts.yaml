@@ -1,0 +1,119 @@
+# Example: HTTP service alerting rules for chalert
+#
+# These rules query ClickHouse tables containing HTTP request logs
+# and fire alerts based on error rates, latency, and throughput.
+#
+# Assumptions:
+#   - Table `http_requests` exists with columns:
+#     timestamp DateTime, service String, endpoint String,
+#     status UInt16, duration_ms Float64
+#   - Data is partitioned by day and indexed on (service, timestamp)
+
+groups:
+  - name: http-errors
+    interval: 1m
+    # eval_delay accounts for ClickHouse ingestion lag. If your pipeline
+    # has ~30s of delay between event time and data being queryable, set this.
+    eval_delay: 30s
+    labels:
+      team: platform
+      severity: warning
+
+    rules:
+      # Alert: High error rate per service/endpoint
+      # Fires when >5% of requests return 5xx over a 5-minute window.
+      #
+      # Query contract:
+      #   - String columns (service, endpoint) → become alert dimensions/labels
+      #   - Numeric column "value" → the metric being evaluated
+      #   - HAVING clause → the threshold (only rows exceeding it are returned)
+      - alert: HighErrorRate
+        expr: |
+          SELECT
+              service,
+              endpoint,
+              countIf(status >= 500) / count() AS value
+          FROM http_requests
+          WHERE timestamp > now() - INTERVAL 5 MINUTE
+          GROUP BY service, endpoint
+          HAVING value > 0.05
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on {{ $labels.service }}{{ $labels.endpoint }}"
+          description: "Error rate is {{ $value }} (>5%) for the last 5 minutes"
+
+      # Alert: High P99 latency
+      # Fires when P99 latency exceeds 2 seconds.
+      - alert: HighLatencyP99
+        expr: |
+          SELECT
+              service,
+              endpoint,
+              quantile(0.99)(duration_ms) AS value
+          FROM http_requests
+          WHERE timestamp > now() - INTERVAL 5 MINUTE
+          GROUP BY service, endpoint
+          HAVING value > 2000
+        for: 5m
+        annotations:
+          summary: "P99 latency {{ $value }}ms on {{ $labels.service }}{{ $labels.endpoint }}"
+
+      # Alert: Zero traffic (dead endpoint detection)
+      # Fires when an endpoint that normally receives traffic goes silent.
+      # Uses a subquery to compare current vs historical traffic.
+      - alert: NoTraffic
+        expr: |
+          SELECT
+              service,
+              endpoint,
+              count() AS value
+          FROM http_requests
+          WHERE timestamp > now() - INTERVAL 10 MINUTE
+          GROUP BY service, endpoint
+          HAVING value = 0
+        for: 10m
+        annotations:
+          summary: "No traffic on {{ $labels.service }}{{ $labels.endpoint }} for 10 minutes"
+
+  - name: http-throughput
+    interval: 5m
+    labels:
+      team: platform
+
+    rules:
+      # Alert: Sudden traffic drop
+      # Compares current 5-minute window to the same window yesterday.
+      # Fires if traffic dropped by more than 80%.
+      - alert: TrafficDrop
+        expr: |
+          WITH
+              current AS (
+                  SELECT service, count() AS cnt
+                  FROM http_requests
+                  WHERE timestamp > now() - INTERVAL 5 MINUTE
+                  GROUP BY service
+              ),
+              baseline AS (
+                  SELECT service, count() / 288 AS avg_5m_cnt
+                  FROM http_requests
+                  WHERE timestamp > now() - INTERVAL 1 DAY
+                    AND timestamp < now() - INTERVAL 5 MINUTE
+                  GROUP BY service
+              )
+          SELECT
+              c.service AS service,
+              CASE WHEN b.avg_5m_cnt > 0
+                   THEN c.cnt / b.avg_5m_cnt
+                   ELSE 1
+              END AS value
+          FROM current c
+          LEFT JOIN baseline b ON c.service = b.service
+          WHERE b.avg_5m_cnt > 100
+          HAVING value < 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Traffic on {{ $labels.service }} dropped to {{ $value }} of baseline"

@@ -1,0 +1,150 @@
+# Example: Using Refreshable Materialized Views as pre-aggregation
+#
+# ClickHouse Refreshable MVs (REFRESH EVERY) run a query on a schedule and
+# atomically swap the results into a target table. This is ideal for expensive
+# aggregations that multiple alert rules can read from.
+#
+# chalert does NOT manage RMV lifecycle — you create the views yourself.
+# chalert's alert rules then SELECT FROM the pre-computed target tables,
+# which is fast and cheap.
+#
+# === Step 1: Create the RMV in ClickHouse ===
+#
+# This view refreshes every minute, computing payment statistics per provider.
+# OFFSET staggers the refresh so it doesn't coincide with other views.
+# RANDOMIZE FOR adds jitter to avoid thundering herd.
+#
+#   CREATE MATERIALIZED VIEW payment_stats_mv
+#   REFRESH EVERY 1 MINUTE OFFSET 10 SECOND RANDOMIZE FOR 5 SECOND
+#   TO payment_stats
+#   AS
+#     SELECT
+#         provider,
+#         countIf(status = 'failed') AS failed,
+#         countIf(status = 'success') AS succeeded,
+#         count() AS total,
+#         countIf(status = 'failed') / count() AS fail_rate,
+#         avg(amount) AS avg_amount,
+#         now() AS refreshed_at
+#     FROM payments
+#     WHERE created_at > now() - INTERVAL 10 MINUTE
+#     GROUP BY provider
+#     HAVING total > 0;
+#
+# === Step 2: Alert rules read from the target table ===
+#
+# The alert queries are trivial SELECTs — fast, no heavy aggregation.
+
+groups:
+  - name: payment-alerts
+    interval: 1m
+    labels:
+      team: payments
+      pattern: rmv-preaggregation
+
+    rules:
+      # Alert: Payment failure rate too high
+      # Reads from the pre-computed payment_stats table.
+      - alert: PaymentFailureRate
+        expr: |
+          SELECT
+              provider,
+              fail_rate AS value
+          FROM payment_stats
+          WHERE fail_rate > 0.10 AND total > 50
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider {{ $labels.provider }} failure rate {{ $value }}"
+
+      # Alert: Payment volume drop
+      # Same base table, different threshold. No extra aggregation cost.
+      - alert: PaymentVolumeDrop
+        expr: |
+          SELECT
+              provider,
+              total AS value
+          FROM payment_stats
+          WHERE total < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider {{ $labels.provider }} only {{ $value }} payments in window"
+
+# === Example 2: Shared base table for multiple alert groups ===
+#
+# A single RMV can serve alerts across different groups and intervals.
+#
+# Create the RMV:
+#
+#   CREATE MATERIALIZED VIEW http_rollup_mv
+#   REFRESH EVERY 1 MINUTE OFFSET 30 SECOND RANDOMIZE FOR 5 SECOND
+#   TO http_rollup
+#   AS
+#     SELECT
+#         service,
+#         endpoint,
+#         countIf(status >= 500) AS errors,
+#         count() AS total,
+#         countIf(status >= 500) / count() AS error_rate,
+#         quantile(0.99)(duration_ms) AS p99_ms,
+#         now() AS refreshed_at
+#     FROM http_requests
+#     WHERE timestamp > now() - INTERVAL 5 MINUTE
+#     GROUP BY service, endpoint
+#     HAVING total > 0;
+
+  - name: http-errors
+    interval: 1m
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          SELECT
+              service,
+              endpoint,
+              error_rate AS value
+          FROM http_rollup
+          WHERE error_rate > 0.05 AND total > 100
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}{{ $labels.endpoint }} error rate {{ $value }}"
+
+  - name: http-latency
+    interval: 2m
+    rules:
+      - alert: HighP99Latency
+        expr: |
+          SELECT
+              service,
+              endpoint,
+              p99_ms AS value
+          FROM http_rollup
+          WHERE p99_ms > 1000 AND total > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}{{ $labels.endpoint }} p99 {{ $value }}ms"
+
+# === Monitoring your RMVs ===
+#
+# You can monitor RMV health with a chalert rule that reads system.view_refreshes:
+#
+#   - alert: StaleRMV
+#     expr: |
+#       SELECT
+#           database,
+#           view AS table,
+#           dateDiff('second', last_success_time, now()) AS value
+#       FROM system.view_refreshes
+#       WHERE database = 'default'
+#         AND view LIKE '%_mv'
+#       HAVING value > 300
+#     labels:
+#       severity: warning
+#     annotations:
+#       summary: "RMV {{ $labels.database }}.{{ $labels.table }} last refreshed {{ $value }}s ago"

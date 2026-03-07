@@ -1,0 +1,149 @@
+# Example: Infrastructure alerting rules
+#
+# These rules demonstrate more advanced ClickHouse query patterns:
+#   - Querying system tables
+#   - Window functions for trend detection
+#   - Cross-table joins for correlation
+#
+# Assumptions:
+#   - ClickHouse cluster with system tables accessible
+#   - Custom `node_metrics` table for host-level metrics
+#   - Custom `k8s_events` table for Kubernetes events
+
+groups:
+  - name: clickhouse-health
+    interval: 2m
+    labels:
+      team: data-platform
+      component: clickhouse
+
+    rules:
+      # Alert: Too many parts in a partition
+      # ClickHouse performance degrades significantly when parts accumulate.
+      # This is an early warning before "too many parts" errors block inserts.
+      - alert: TooManyParts
+        expr: |
+          SELECT
+              database,
+              table,
+              count() AS value
+          FROM system.parts
+          WHERE active = 1
+          GROUP BY database, table
+          HAVING value > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }}.{{ $labels.table }} has {{ $value }} active parts"
+          description: "Parts count exceeds 300. Consider optimizing merge settings or reducing insert frequency."
+
+      # Alert: Slow merges
+      # Detects when merge operations are falling behind.
+      - alert: SlowMerges
+        expr: |
+          SELECT
+              database,
+              table,
+              max(elapsed) AS value
+          FROM system.merges
+          GROUP BY database, table
+          HAVING value > 3600
+        labels:
+          severity: critical
+        annotations:
+          summary: "Merge on {{ $labels.database }}.{{ $labels.table }} running for {{ $value }}s"
+
+      # Alert: Replication lag
+      # For replicated tables, detects when a replica falls behind.
+      - alert: ReplicationLag
+        expr: |
+          SELECT
+              database,
+              table,
+              absolute_delay AS value
+          FROM system.replicas
+          WHERE absolute_delay > 0
+          HAVING value > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication lag {{ $value }}s on {{ $labels.database }}.{{ $labels.table }}"
+
+  - name: disk-usage
+    interval: 5m
+    labels:
+      team: infra
+
+    rules:
+      # Alert: Disk space running low
+      # Queries the system.disks table for free space.
+      - alert: DiskSpaceLow
+        expr: |
+          SELECT
+              name AS disk_name,
+              path,
+              (1 - (free_space / total_space)) AS value
+          FROM system.disks
+          WHERE total_space > 0
+          HAVING value > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk {{ $labels.disk_name }} at {{ $labels.path }} is {{ $value }} full"
+
+      # Alert: Disk space critical
+      - alert: DiskSpaceCritical
+        expr: |
+          SELECT
+              name AS disk_name,
+              path,
+              (1 - (free_space / total_space)) AS value
+          FROM system.disks
+          WHERE total_space > 0
+          HAVING value > 0.95
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Disk {{ $labels.disk_name }} at {{ $labels.path }} is {{ $value }} full"
+
+  - name: query-performance
+    interval: 5m
+    labels:
+      team: data-platform
+
+    rules:
+      # Alert: Long-running queries
+      # Detects queries that have been running for too long.
+      # Excludes chalert's own queries to avoid self-alerting loops.
+      - alert: LongRunningQuery
+        expr: |
+          SELECT
+              user,
+              query_id,
+              elapsed AS value
+          FROM system.processes
+          WHERE elapsed > 300
+            AND query NOT LIKE '%chalert%'
+            AND query NOT LIKE '%system.processes%'
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query by {{ $labels.user }} running for {{ $value }}s ({{ $labels.query_id }})"
+
+      # Alert: High memory usage per query
+      - alert: HighMemoryQuery
+        expr: |
+          SELECT
+              user,
+              query_id,
+              memory_usage / 1073741824 AS value
+          FROM system.processes
+          WHERE memory_usage > 10737418240
+            AND query NOT LIKE '%chalert%'
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query by {{ $labels.user }} using {{ $value }}GB memory"

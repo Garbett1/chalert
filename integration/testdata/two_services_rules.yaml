@@ -1,0 +1,18 @@
+groups:
+  - name: http-errors
+    interval: 5s
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          SELECT
+              service,
+              countIf(status >= 500) / count() AS value
+          FROM http_requests
+          WHERE timestamp > now() - INTERVAL 1 MINUTE
+          GROUP BY service
+          HAVING value > 0.05
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate {{ $value }} on {{ $labels.service }}"

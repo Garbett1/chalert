@@ -1,0 +1,141 @@
+# Example: Business metric alerting rules
+#
+# These demonstrate chalert's strength over Prometheus-based alerting:
+# alerting on business data that lives natively in ClickHouse, without
+# needing to export it as time series metrics first.
+#
+# Assumptions:
+#   - `orders` table: order_id UUID, user_id String, amount Float64,
+#     status Enum('pending','completed','failed','refunded'), created_at DateTime
+#   - `payments` table: payment_id UUID, order_id UUID, provider String,
+#     status Enum('success','failed','timeout'), amount Float64, created_at DateTime
+#   - `user_sessions` table: session_id UUID, user_id String,
+#     started_at DateTime, ended_at Nullable(DateTime), page_views UInt32
+
+groups:
+  - name: payments
+    interval: 1m
+    labels:
+      team: payments
+      domain: finops
+
+    rules:
+      # Alert: Payment failure rate spike
+      # This is the kind of alert that's painful with Prometheus — you'd need
+      # to export payment metrics, aggregate them, then alert. With chalert,
+      # you query the source of truth directly.
+      - alert: PaymentFailureRate
+        expr: |
+          SELECT
+              provider,
+              countIf(status = 'failed') / count() AS value
+          FROM payments
+          WHERE created_at > now() - INTERVAL 10 MINUTE
+          GROUP BY provider
+          HAVING value > 0.10 AND count() > 50
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Payment provider {{ $labels.provider }} failing at {{ $value }} rate"
+          description: "More than 10% of payments through {{ $labels.provider }} are failing"
+          runbook: "https://wiki.internal/runbooks/payment-failures"
+
+      # Alert: Unusual refund volume
+      # Detects potential fraud or system issues causing mass refunds.
+      - alert: HighRefundVolume
+        expr: |
+          SELECT
+              'global' AS scope,
+              countIf(status = 'refunded') AS value
+          FROM orders
+          WHERE created_at > now() - INTERVAL 1 HOUR
+          HAVING value > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} refunds in the last hour"
+
+      # Alert: Payment amount anomaly
+      # Detects when average payment amount deviates significantly from norm.
+      - alert: PaymentAmountAnomaly
+        expr: |
+          WITH
+              recent AS (
+                  SELECT avg(amount) AS avg_amount
+                  FROM payments
+                  WHERE created_at > now() - INTERVAL 30 MINUTE
+                    AND status = 'success'
+              ),
+              baseline AS (
+                  SELECT avg(amount) AS avg_amount
+                  FROM payments
+                  WHERE created_at > now() - INTERVAL 7 DAY
+                    AND created_at < now() - INTERVAL 30 MINUTE
+                    AND status = 'success'
+              )
+          SELECT
+              'payment_amount' AS metric,
+              abs(r.avg_amount - b.avg_amount) / b.avg_amount AS value
+          FROM recent r, baseline b
+          WHERE b.avg_amount > 0
+          HAVING value > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Average payment amount deviated {{ $value }} from baseline"
+
+  - name: user-engagement
+    interval: 5m
+    labels:
+      team: product
+
+    rules:
+      # Alert: Active user count drop
+      # Compares current active users to same time yesterday.
+      - alert: ActiveUserDrop
+        expr: |
+          WITH
+              now_count AS (
+                  SELECT uniq(user_id) AS cnt
+                  FROM user_sessions
+                  WHERE started_at > now() - INTERVAL 30 MINUTE
+              ),
+              yesterday_count AS (
+                  SELECT uniq(user_id) AS cnt
+                  FROM user_sessions
+                  WHERE started_at > now() - INTERVAL 1 DAY - INTERVAL 30 MINUTE
+                    AND started_at < now() - INTERVAL 1 DAY
+              )
+          SELECT
+              'active_users' AS metric,
+              CASE WHEN y.cnt > 0 THEN n.cnt / y.cnt ELSE 1 END AS value
+          FROM now_count n, yesterday_count y
+          WHERE y.cnt > 100
+          HAVING value < 0.5
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Active users dropped to {{ $value }} of yesterday's level"
+
+      # Alert: Session error spike
+      # Detects when sessions are abnormally short (potential app crash).
+      - alert: ShortSessionSpike
+        expr: |
+          SELECT
+              'sessions' AS scope,
+              countIf(
+                  ended_at IS NOT NULL
+                  AND dateDiff('second', started_at, ended_at) < 5
+              ) / countIf(ended_at IS NOT NULL) AS value
+          FROM user_sessions
+          WHERE started_at > now() - INTERVAL 15 MINUTE
+          HAVING value > 0.3 AND countIf(ended_at IS NOT NULL) > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} of sessions lasting <5 seconds (possible crash loop)"

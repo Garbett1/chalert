@@ -1,0 +1,11 @@
+route:
+  receiver: test-webhook
+  group_wait: 1s
+  group_interval: 1s
+  repeat_interval: 5s
+  group_by: ['alertname', 'service']
+receivers:
+  - name: test-webhook
+    webhook_configs:
+      - url: 'http://WEBHOOK_HOST/webhook'
+        send_resolved: true
