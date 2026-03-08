@@ -1,0 +1,22 @@
+chalert
+Copyright 2024 chalert contributors
+
+This product is derived from VictoriaMetrics vmalert
+(https://github.com/VictoriaMetrics/VictoriaMetrics),
+licensed under the Apache License, Version 2.0.
+
+The following components are based on or inspired by vmalert:
+
+  - Alert state machine (Inactive -> Pending -> Firing) and evaluation
+    loop design (rule/ package)
+  - Rule configuration YAML format and validation logic (config/ package)
+  - Rule identity hashing scheme: FNV-64a of expression + name + labels
+  - Alertmanager v2 notification payload format (notifier/ package)
+  - Conformance tests ported from vmalert's TestAlertingRule_Exec
+    (rule/conformance_test.go)
+
+VictoriaMetrics copyright notice:
+
+  Copyright 2019-2024 VictoriaMetrics, Inc.
+  Licensed under the Apache License, Version 2.0
+  https://github.com/VictoriaMetrics/VictoriaMetrics/blob/master/LICENSE
