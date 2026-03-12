@@ -1,0 +1,16 @@
+chalert has been deployed.
+
+Get the application URL:
+{{- if eq .Values.service.type "ClusterIP" }}
+  kubectl port-forward svc/{{ include "chalert.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+{{- if not .Values.rules }}
+
+WARNING: No rule files configured. Set .Values.rules or .Values.existingRuleConfigMaps.
+{{- end }}
+
+{{- if not .Values.config.notifierURL }}
+
+WARNING: No notifier.url configured. Alerts will be evaluated but not sent.
+{{- end }}

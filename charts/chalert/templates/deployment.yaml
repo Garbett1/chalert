@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chalert.fullname" . }}
+  labels:
+    {{- include "chalert.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "chalert.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/rules: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "chalert.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "chalert.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            {{- if .Values.config.existingSecret }}
+            - -clickhouse.dsn=$(CLICKHOUSE_DSN)
+            {{- else }}
+            - -clickhouse.dsn={{ include "chalert.clickhouseDSN" . }}
+            {{- end }}
+            {{- if .Values.config.clickhouse.readDSN }}
+            - -clickhouse.read-dsn={{ .Values.config.clickhouse.readDSN }}
+            {{- end }}
+            - -clickhouse.database={{ .Values.config.clickhouse.database }}
+            - -clickhouse.maxQueryTime={{ .Values.config.clickhouse.maxQueryTime }}
+            {{- if .Values.config.clickhouse.maxRowsToRead }}
+            - -clickhouse.maxRowsToRead={{ .Values.config.clickhouse.maxRowsToRead }}
+            {{- end }}
+            {{- if .Values.config.clickhouse.maxThreads }}
+            - -clickhouse.maxThreads={{ .Values.config.clickhouse.maxThreads }}
+            {{- end }}
+            {{- if .Values.config.notifierURL }}
+            - -notifier.url={{ .Values.config.notifierURL }}
+            {{- end }}
+            {{- if .Values.config.externalURL }}
+            - -external.url={{ .Values.config.externalURL }}
+            {{- end }}
+            {{- range $name, $value := .Values.config.externalLabels }}
+            - -external.label={{ $name }}={{ $value }}
+            {{- end }}
+            - -evaluationInterval={{ .Values.config.evaluationInterval }}
+            - -rule.defaultLimit={{ .Values.config.defaultLimit }}
+            - -httpListenAddr=:8880
+            {{- $rulePaths := list -}}
+            {{- if .Values.rules -}}
+              {{- $rulePaths = append $rulePaths "/etc/chalert/rules/*" -}}
+            {{- end -}}
+            {{- range .Values.existingRuleConfigMaps -}}
+              {{- $rulePaths = append $rulePaths (printf "/etc/chalert/rules-ext/%s/*" .) -}}
+            {{- end -}}
+            {{- if $rulePaths }}
+            - -rule={{ join ";" $rulePaths }}
+            {{- end }}
+          {{- if .Values.config.existingSecret }}
+          env:
+            - name: CLICKHOUSE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: dsn
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8880
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.rules }}
+            - name: rules
+              mountPath: /etc/chalert/rules
+              readOnly: true
+            {{- end }}
+            {{- range .Values.existingRuleConfigMaps }}
+            - name: rules-ext-{{ . }}
+              mountPath: /etc/chalert/rules-ext/{{ . }}
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.config.auth.enabled .Values.config.auth.tls.certSecret }}
+            - name: clickhouse-tls
+              mountPath: /etc/chalert/tls/clickhouse
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.rules }}
+        - name: rules
+          configMap:
+            name: {{ include "chalert.fullname" . }}-rules
+        {{- end }}
+        {{- range .Values.existingRuleConfigMaps }}
+        - name: rules-ext-{{ . }}
+          configMap:
+            name: {{ . }}
+        {{- end }}
+        {{- if and .Values.config.auth.enabled .Values.config.auth.tls.certSecret }}
+        - name: clickhouse-tls
+          secret:
+            secretName: {{ .Values.config.auth.tls.certSecret }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

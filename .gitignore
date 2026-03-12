@@ -1,6 +1,3 @@
-# Binary
-chalert
-
 # IDE
 .idea/
 .vscode/
@@ -14,3 +11,5 @@ Thumbs.db
 # Test
 *.test
 coverage.out
+
+chalert

@@ -1,0 +1,126 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/garbett1/chalert
+  tag: "v0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# -- chalert configuration
+config:
+  # -- ClickHouse connection DSN
+  # For production, use clickhouse.auth or clickhouse.existingSecret instead of embedding credentials here
+  clickhouse:
+    dsn: "clickhouse://localhost:9000/default"
+    # -- Optional read replica DSN
+    readDSN: ""
+    # -- Database for alert state tables
+    database: "default"
+    # -- Max query execution time
+    maxQueryTime: "30s"
+    # -- Max rows ClickHouse may read per alert query (0 = unlimited)
+    maxRowsToRead: 0
+    # -- Max threads per alert query (0 = ClickHouse default)
+    maxThreads: 0
+
+  # -- ClickHouse authentication
+  # Populates DSN from discrete fields. Takes precedence over config.clickhouse.dsn when enabled.
+  auth:
+    enabled: false
+    # -- ClickHouse host:port
+    endpoint: "clickhouse:9000"
+    # -- Username
+    username: "default"
+    # -- Password (plain text; prefer existingSecret for production)
+    password: ""
+    # -- Use TLS (clickhouse:// vs clickhouses://)
+    tls:
+      enabled: false
+      # -- Skip server certificate verification (insecure, for testing only)
+      insecureSkipVerify: false
+      # -- Name of a Secret containing ca.crt, tls.crt, tls.key
+      # Mounted at /etc/chalert/tls/clickhouse/
+      certSecret: ""
+
+  # -- Reference an existing Secret for ClickHouse DSN
+  # The secret must contain a key "dsn" with the full connection string
+  existingSecret: ""
+
+  # -- Alertmanager URL(s), comma-separated for HA
+  notifierURL: ""
+  # -- External URL for alert source links
+  externalURL: ""
+  # -- Default evaluation interval
+  evaluationInterval: "1m"
+  # -- Default max alert instances per rule
+  defaultLimit: 10000
+  # -- External labels applied to all alerts
+  externalLabels: {}
+  #   env: production
+  #   cluster: us-east-1
+
+# -- Rule files to load (mounted as ConfigMap)
+# Each key is a filename, value is the YAML rule content
+rules: {}
+#   http_alerts.yaml: |
+#     groups:
+#       - name: http
+#         rules:
+#           - alert: HighErrorRate
+#             expr: |
+#               SELECT service, count() as value
+#               FROM http_logs
+#               WHERE status >= 500
+#               AND timestamp > now() - INTERVAL 5 MINUTE
+#               GROUP BY service
+#               HAVING value > 100
+
+# -- Mount rule files from existing ConfigMaps
+# Each entry is the name of an existing ConfigMap
+existingRuleConfigMaps: []
+
+service:
+  type: ClusterIP
+  port: 8880
+
+resources: {}
+  # limits:
+  #   cpu: 200m
+  #   memory: 256Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5

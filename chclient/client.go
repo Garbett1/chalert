@@ -24,7 +24,10 @@ package chclient
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -41,6 +44,17 @@ type Config struct {
 	// queries. If empty, DSN is used for reads too. Point this at a read
 	// replica to isolate alert query load from ingestion.
 	ReadDSN string
+
+	// Username overrides any username in the DSN. If set, it is applied to
+	// the parsed connection options after DSN parsing.
+	Username string
+
+	// Password overrides any password in the DSN. Only used when Username is set.
+	Password string
+
+	// TLS configures TLS for the ClickHouse connection. When any TLS field
+	// is set, a crypto/tls.Config is built and applied to the connection.
+	TLS TLSConfig
 
 	// MaxQueryTime limits the maximum execution time for any single alert
 	// evaluation query. Prevents runaway queries from consuming cluster
@@ -59,6 +73,67 @@ type Config struct {
 	// MaxThreads limits threads per query on the ClickHouse side (server-side
 	// max_threads setting). 0 means use ClickHouse default.
 	MaxThreads int
+}
+
+// TLSConfig holds TLS settings for the ClickHouse connection.
+// Follows the same pattern as the OpenTelemetry Collector's ClickHouse exporter.
+type TLSConfig struct {
+	// Enabled forces TLS on the connection even if the DSN scheme is clickhouse://.
+	Enabled bool
+
+	// CAFile is the path to a PEM-encoded CA certificate file for verifying
+	// the server's certificate.
+	CAFile string
+
+	// CertFile is the path to a PEM-encoded client certificate file for mTLS.
+	CertFile string
+
+	// KeyFile is the path to a PEM-encoded client private key file for mTLS.
+	KeyFile string
+
+	// ServerName overrides the server name used for certificate verification.
+	ServerName string
+
+	// InsecureSkipVerify disables server certificate verification. For testing only.
+	InsecureSkipVerify bool
+}
+
+// hasTLS returns true if any TLS field is explicitly configured.
+func (t TLSConfig) hasTLS() bool {
+	return t.Enabled || t.CAFile != "" || t.CertFile != "" || t.KeyFile != "" || t.ServerName != "" || t.InsecureSkipVerify
+}
+
+// buildTLSConfig creates a *tls.Config from the TLS settings.
+func (t TLSConfig) buildTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: t.InsecureSkipVerify,
+		ServerName:         t.ServerName,
+	}
+
+	if t.CAFile != "" {
+		caPEM, err := os.ReadFile(t.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("CA file %s contains no valid certificates", t.CAFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if t.CertFile != "" || t.KeyFile != "" {
+		if t.CertFile == "" || t.KeyFile == "" {
+			return nil, fmt.Errorf("both tls.certFile and tls.keyFile must be set for mTLS")
+		}
+		cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsCfg, nil
 }
 
 // Client provides ClickHouse connectivity with separate read/write pools.
@@ -91,21 +166,38 @@ func New(cfg Config) (*Client, error) {
 		readSettings["max_threads"] = cfg.MaxThreads
 	}
 
-	writeConn, err := openConn(cfg.DSN, cfg.MaxOpenConns, nil)
+	// Build TLS config once, shared across connections.
+	var tlsCfg *tls.Config
+	if cfg.TLS.hasTLS() {
+		var err error
+		tlsCfg, err = cfg.TLS.buildTLSConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build TLS config: %w", err)
+		}
+	}
+
+	cOpts := connOptions{
+		maxOpenConns: cfg.MaxOpenConns,
+		username:     cfg.Username,
+		password:     cfg.Password,
+		tlsConfig:    tlsCfg,
+	}
+
+	writeConn, err := openConn(cfg.DSN, cOpts, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open write connection: %w", err)
 	}
 
 	readConn := writeConn
 	if cfg.ReadDSN != "" {
-		readConn, err = openConn(cfg.ReadDSN, cfg.MaxOpenConns, readSettings)
+		readConn, err = openConn(cfg.ReadDSN, cOpts, readSettings)
 		if err != nil {
 			writeConn.Close()
 			return nil, fmt.Errorf("failed to open read connection: %w", err)
 		}
 	} else if len(readSettings) > 0 {
 		// Same DSN but with guard rail settings for reads.
-		readConn, err = openConn(cfg.DSN, cfg.MaxOpenConns, readSettings)
+		readConn, err = openConn(cfg.DSN, cOpts, readSettings)
 		if err != nil {
 			writeConn.Close()
 			return nil, fmt.Errorf("failed to open read connection: %w", err)
@@ -119,22 +211,42 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-func openConn(dsn string, maxOpen int, settings clickhouse.Settings) (driver.Conn, error) {
-	opts, err := clickhouse.ParseDSN(dsn)
+type connOptions struct {
+	maxOpenConns int
+	username     string
+	password     string
+	tlsConfig    *tls.Config
+}
+
+func openConn(dsn string, opts connOptions, settings clickhouse.Settings) (driver.Conn, error) {
+	chOpts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("invalid DSN: %w", err)
 	}
-	opts.MaxOpenConns = maxOpen
+	chOpts.MaxOpenConns = opts.maxOpenConns
+
+	// Override auth if explicit username was provided, following the OTel
+	// collector pattern where discrete fields take precedence over the DSN.
+	if opts.username != "" {
+		chOpts.Auth.Username = opts.username
+		chOpts.Auth.Password = opts.password
+	}
+
+	// Apply TLS if configured.
+	if opts.tlsConfig != nil {
+		chOpts.TLS = opts.tlsConfig
+	}
+
 	if len(settings) > 0 {
-		if opts.Settings == nil {
-			opts.Settings = make(clickhouse.Settings)
+		if chOpts.Settings == nil {
+			chOpts.Settings = make(clickhouse.Settings)
 		}
 		for k, v := range settings {
-			opts.Settings[k] = v
+			chOpts.Settings[k] = v
 		}
 	}
 
-	conn, err := clickhouse.Open(opts)
+	conn, err := clickhouse.Open(chOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open connection: %w", err)
 	}
