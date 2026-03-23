@@ -192,14 +192,14 @@ func New(cfg Config) (*Client, error) {
 	if cfg.ReadDSN != "" {
 		readConn, err = openConn(cfg.ReadDSN, cOpts, readSettings)
 		if err != nil {
-			writeConn.Close()
+			_ = writeConn.Close()
 			return nil, fmt.Errorf("failed to open read connection: %w", err)
 		}
 	} else if len(readSettings) > 0 {
 		// Same DSN but with guard rail settings for reads.
 		readConn, err = openConn(cfg.DSN, cOpts, readSettings)
 		if err != nil {
-			writeConn.Close()
+			_ = writeConn.Close()
 			return nil, fmt.Errorf("failed to open read connection: %w", err)
 		}
 	}
@@ -254,7 +254,7 @@ func openConn(dsn string, opts connOptions, settings clickhouse.Settings) (drive
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := conn.Ping(ctx); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("ping failed: %w", err)
 	}
 	return conn, nil

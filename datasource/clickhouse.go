@@ -75,7 +75,7 @@ func (q *ClickHouseQuerier) Query(ctx context.Context, expr string, ts time.Time
 	if err != nil {
 		return Result{}, fmt.Errorf("query execution failed: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	metrics, err := mapRows(rows, ts)
 	if err != nil {

@@ -166,7 +166,7 @@ func main() {
 	if err != nil {
 		fatalf("failed to connect to ClickHouse: %s", err)
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 
 	// Ensure state tables exist
 	store := statestore.New(ch.WriteConn(), *clickhouseDB)
@@ -295,7 +295,7 @@ func main() {
 
 			// Shut down HTTP server
 			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			httpSrv.Shutdown(shutCtx)
+			_ = httpSrv.Shutdown(shutCtx)
 			shutCancel()
 
 			slog.Info("chalert stopped")

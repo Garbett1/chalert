@@ -186,8 +186,7 @@ groups:
 }
 
 func TestEnvSubstitution(t *testing.T) {
-	os.Setenv("CHALERT_TEST_TABLE", "my_table")
-	defer os.Unsetenv("CHALERT_TEST_TABLE")
+	t.Setenv("CHALERT_TEST_TABLE", "my_table")
 
 	yaml := `
 groups:

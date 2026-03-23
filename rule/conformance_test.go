@@ -51,10 +51,7 @@ func execSteps(t *testing.T, ar *AlertingRule, step time.Duration,
 			// Filter out stale inactive alerts for comparison (vmalert deletes
 			// pending alerts that disappear, and inactive alerts are retained
 			// for resolvedRetention — only compare non-deleted alerts).
-			var active []AlertInstance
-			for _, a := range got {
-				active = append(active, a)
-			}
+			active := append([]AlertInstance{}, got...)
 
 			if len(active) != len(exp) {
 				t.Fatalf("step %d: expected %d alerts, got %d\n  expected: %v\n  got: %v",

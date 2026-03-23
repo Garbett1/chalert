@@ -171,7 +171,7 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying active alerts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var instances []rule.AlertInstance
 	for rows.Next() {

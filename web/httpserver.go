@@ -26,7 +26,7 @@ func New(addr, version string) *Server {
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"version": version})
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": version})
 	})
 
 	s.srv = &http.Server{
@@ -52,17 +52,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 }
 
-func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	if !s.ready.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("not ready"))
+		_, _ = w.Write([]byte("not ready"))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ready"))
+	_, _ = w.Write([]byte("ready"))
 }

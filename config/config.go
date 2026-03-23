@@ -126,7 +126,7 @@ func (r *Rule) Validate() error {
 	// Basic SQL sanity checks. Full validation requires a CH connection.
 	exprUpper := strings.ToUpper(strings.TrimSpace(r.Expr))
 	if !strings.HasPrefix(exprUpper, "SELECT") && !strings.HasPrefix(exprUpper, "WITH") {
-		return fmt.Errorf("'expr' must be a SELECT or WITH statement, got: %.40s...", r.Expr)
+		return fmt.Errorf("'expr' must be a SELECT or WITH statement, got: %.40s", r.Expr)
 	}
 
 	return nil
