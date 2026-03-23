@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/garbett1/chalert/metrics"
 	"github.com/garbett1/chalert/rule"
 )
 
@@ -96,8 +97,17 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("chalert panic in notifier", "url", u, "panic", rec)
+					metrics.NotifierErrors.Inc()
+				}
+			}()
 			if err := am.sendTo(ctx, u, payload); err != nil {
+				metrics.NotifierSends.WithLabelValues(u, "error").Inc()
 				errCh <- fmt.Errorf("alertmanager %s: %w", u, err)
+			} else {
+				metrics.NotifierSends.WithLabelValues(u, "success").Inc()
 			}
 		}()
 	}

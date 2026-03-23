@@ -31,6 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -42,9 +43,11 @@ import (
 	"github.com/garbett1/chalert/chclient"
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
+	"github.com/garbett1/chalert/metrics"
 	"github.com/garbett1/chalert/notifier"
 	"github.com/garbett1/chalert/rule"
 	"github.com/garbett1/chalert/statestore"
+	"github.com/garbett1/chalert/web"
 )
 
 // arrayString implements flag.Value for repeatable string flags.
@@ -72,9 +75,14 @@ var (
 	maxRowsToRead      = flag.Int64("clickhouse.maxRowsToRead", 0, "Max rows ClickHouse may read per alert query. 0 means unlimited.")
 	maxThreads         = flag.Int("clickhouse.maxThreads", 0, "Max threads per alert query on ClickHouse. 0 means ClickHouse default.")
 	defaultLimit       = flag.Int("rule.defaultLimit", 10000, "Default max alert instances per rule when group config omits 'limit'. 0 means unlimited.")
+	resendDelay        = flag.Duration("rule.resendDelay", time.Minute, "Minimum interval between re-sending a firing alert to the notifier.")
 	dryRun             = flag.Bool("dryRun", false, "Parse and validate rules without starting evaluation.")
 	httpAddr           = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
+	shutdownTimeout = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
 	externalLabelsRaw  arrayString
+
+	// version is set by -ldflags at build time.
+	version = "dev"
 
 	// TLS flags for ClickHouse connections
 	tlsEnabled            = flag.Bool("clickhouse.tls", false, "Enable TLS for ClickHouse connections.")
@@ -96,6 +104,9 @@ func main() {
 		fatalf("'-clickhouse.dsn' flag is required")
 	}
 
+	// Apply resend delay
+	rule.ResendDelay = *resendDelay
+
 	// Parse external labels
 	externalLabels, err := parseExternalLabels(externalLabelsRaw)
 	if err != nil {
@@ -115,6 +126,14 @@ func main() {
 			len(groups), countRules(groups))
 		return
 	}
+
+	// Start HTTP server for health checks, metrics, and version info.
+	httpSrv := web.New(*httpAddr, version)
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("http server error", "error", err)
+		}
+	}()
 
 	// Resolve password: file takes precedence over flag.
 	password := *clickhousePass
@@ -220,7 +239,9 @@ func main() {
 		}()
 	}
 
+	httpSrv.SetReady(true)
 	slog.Info("chalert started",
+		"version", version,
 		"groups", len(ruleGroups),
 		"http", *httpAddr,
 		"clickhouse", redactDSN(*clickhouseDSN))
@@ -236,25 +257,47 @@ func main() {
 			newGroups, err := config.Parse(paths)
 			if err != nil {
 				slog.Error("failed to reload rules", "error", err)
+				metrics.ConfigReloads.WithLabelValues("error").Inc()
 				continue
 			}
 			if err := config.NormalizeRuleIDs(newGroups, queryHash); err != nil {
 				slog.Error("failed to normalize rule IDs on reload", "error", err)
+				metrics.ConfigReloads.WithLabelValues("error").Inc()
 				continue
 			}
 			reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
+			metrics.ConfigReloads.WithLabelValues("success").Inc()
+			metrics.ConfigLastReloadSuccess.SetToCurrentTime()
 			slog.Info("rules reloaded", "groups", len(ruleGroups))
 
 		case syscall.SIGINT, syscall.SIGTERM:
 			slog.Info("shutdown signal received", "signal", sig)
+			httpSrv.SetReady(false)
 			cancel()
 			for _, g := range ruleGroups {
 				g.Close()
 			}
-			wg.Wait()
+
+			// Wait for groups with a timeout to prevent hanging during rolling restarts.
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(*shutdownTimeout):
+				slog.Error("shutdown timeout exceeded, some goroutines did not exit")
+			}
 
 			// Final state persistence
 			persistAllState(context.Background(), ruleGroups, store)
+
+			// Shut down HTTP server
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			httpSrv.Shutdown(shutCtx)
+			shutCancel()
+
 			slog.Info("chalert stopped")
 			return
 		}

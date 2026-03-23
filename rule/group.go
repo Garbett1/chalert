@@ -10,6 +10,7 @@ import (
 
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
+	"github.com/garbett1/chalert/metrics"
 )
 
 // Group is a collection of alerting rules that share an evaluation interval.
@@ -215,12 +216,16 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 	if concurrency <= 1 {
 		var all []AlertInstance
 		for _, r := range rules {
+			start := time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
+			metrics.RuleEvalDuration.WithLabelValues(g.Name, r.Name()).Observe(time.Since(start).Seconds())
 			if err != nil {
+				metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
 				slog.Error("chalert rule exec failed",
 					"rule", r.Name(), "group", g.Name, "error", err)
 				continue
 			}
+			metrics.RuleEvalSamples.WithLabelValues(g.Name, r.Name()).Set(float64(len(alerts)))
 			all = append(all, alerts...)
 		}
 		return all
@@ -228,9 +233,10 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 
 	// Concurrent evaluation
 	type result struct {
-		alerts []AlertInstance
-		err    error
-		rule   string
+		alerts   []AlertInstance
+		err      error
+		rule     string
+		duration time.Duration
 	}
 	results := make(chan result, len(rules))
 	sem := make(chan struct{}, concurrency)
@@ -241,11 +247,19 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("chalert panic in rule exec",
+						"rule", r.Name(), "group", g.Name, "panic", rec)
+					metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			start := time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
-			results <- result{alerts: alerts, err: err, rule: r.Name()}
+			results <- result{alerts: alerts, err: err, rule: r.Name(), duration: time.Since(start)}
 		}()
 	}
 
@@ -256,11 +270,14 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 
 	var all []AlertInstance
 	for res := range results {
+		metrics.RuleEvalDuration.WithLabelValues(g.Name, res.rule).Observe(res.duration.Seconds())
 		if res.err != nil {
+			metrics.RuleEvalErrors.WithLabelValues(g.Name, res.rule).Inc()
 			slog.Error("chalert rule exec failed",
 				"rule", res.rule, "group", g.Name, "error", res.err)
 			continue
 		}
+		metrics.RuleEvalSamples.WithLabelValues(g.Name, res.rule).Set(float64(len(res.alerts)))
 		all = append(all, res.alerts...)
 	}
 	return all

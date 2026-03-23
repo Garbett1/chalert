@@ -189,6 +189,13 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 // so they can be re-sent to notifiers as resolved.
 const resolvedRetention = 15 * time.Minute
 
+// ResendDelay is the minimum interval between re-sending a firing alert
+// to the notifier. This avoids flooding Alertmanager on every evaluation tick.
+// Alertmanager deduplicates anyway, but reducing sends saves network/CPU.
+// Set to the group interval so alerts are sent at most once per evaluation
+// after the initial send, plus one immediate send on state transitions.
+var ResendDelay = time.Minute
+
 // Exec evaluates the rule expression and updates alert state.
 // Returns the list of alerts that should be sent to notifiers.
 func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]AlertInstance, error) {
@@ -321,14 +328,25 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 }
 
 // alertsToSend returns alerts that need to be sent to notifiers.
+// Firing alerts are resent only if ResendDelay has elapsed since the last send,
+// or if the alert just transitioned to firing (LastSent is zero or before FiredAt).
+// Resolved alerts are always sent (once).
 func (ar *AlertingRule) alertsToSend(ts time.Time) []AlertInstance {
 	var out []AlertInstance
 	for _, a := range ar.alerts {
 		if a.State == StatePending {
 			continue
 		}
-		// Send firing alerts, and recently resolved alerts
-		if a.State == StateFiring || (a.State == StateInactive && !a.ResolvedAt.IsZero()) {
+		if a.State == StateFiring {
+			// Always send on first fire; otherwise respect resend delay.
+			if !a.LastSent.IsZero() && a.LastSent.After(a.FiredAt) && ts.Sub(a.LastSent) < ResendDelay {
+				continue
+			}
+			a.LastSent = ts
+			inst := *a
+			inst.EvaluationInterval = ar.groupInterval
+			out = append(out, inst)
+		} else if a.State == StateInactive && !a.ResolvedAt.IsZero() {
 			a.LastSent = ts
 			inst := *a
 			inst.EvaluationInterval = ar.groupInterval

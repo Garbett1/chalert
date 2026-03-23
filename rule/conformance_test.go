@@ -9,7 +9,7 @@ package rule
 //
 // Differences from vmalert (documented, not bugs):
 //   - chalert doesn't emit ALERTS/ALERTS_FOR_STATE time series
-//   - chalert doesn't have resendDelay logic in alertsToSend()
+//   - chalert has its own resendDelay logic in alertsToSend()
 //   - chalert's Exec() returns alerts-to-send, vmalert's exec() returns time series
 
 import (
