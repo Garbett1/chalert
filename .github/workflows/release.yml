@@ -108,4 +108,5 @@ jobs:
           sed -i "s/^appVersion:.*/appVersion: ${GITHUB_REF_NAME}/" charts/chalert/Chart.yaml
           sed -i "s/tag:.*/tag: ${GITHUB_REF_NAME}/" charts/chalert/values.yaml
           helm package charts/chalert
-          helm push chalert-${VERSION}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          helm push chalert-${VERSION}.tgz oci://${{ env.REGISTRY }}/${OWNER}/charts
