@@ -121,10 +121,9 @@ jobs:
       - name: Package and push chart
         run: |
           VERSION=${{ needs.release-please.outputs.version }}
-          TAG=${{ needs.release-please.outputs.tag_name }}
           sed -i "s/^version:.*/version: ${VERSION}/" charts/chalert/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" charts/chalert/Chart.yaml
-          sed -i "s/tag:.*/tag: \"${TAG}\"/" charts/chalert/values.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/chalert/Chart.yaml
+          sed -i "s/tag:.*/tag: \"${VERSION}\"/" charts/chalert/values.yaml
           helm package charts/chalert
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           helm push chalert-${VERSION}.tgz oci://${{ env.REGISTRY }}/${OWNER}/charts
