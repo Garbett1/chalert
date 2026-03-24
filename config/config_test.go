@@ -397,6 +397,39 @@ groups:
 	}
 }
 
+func TestReadFilesSkipsDirectories(t *testing.T) {
+	// Simulate Kubernetes ConfigMap mount: the glob matches both the real
+	// YAML file and hidden metadata directories (..data, ..2026_...).
+	dir := t.TempDir()
+
+	// Create a valid rule file
+	yaml := `
+groups:
+  - name: test
+    rules:
+      - alert: TestAlert
+        expr: SELECT 1 AS value
+`
+	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create directories that mimic ConfigMap metadata (..data, ..timestamp)
+	for _, d := range []string{"..data", "..2026_03_24_12_00_00.123456"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	groups, err := Parse([]string{filepath.Join(dir, "*")})
+	if err != nil {
+		t.Fatalf("expected directories to be skipped, got error: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+}
+
 func TestMultiDocumentYAML(t *testing.T) {
 	yaml := `
 groups:

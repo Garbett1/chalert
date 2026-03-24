@@ -39,7 +39,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/garbett1/chalert/chclient"
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
@@ -179,12 +178,9 @@ func main() {
 	// This replaces the Go-side whitespace normalization with CH-native
 	// query normalization so cosmetic expr edits don't change rule identity.
 	queryHash := func(expr string) (uint64, error) {
-		chCtx := clickhouse.Context(context.Background(), clickhouse.WithParameters(clickhouse.Parameters{
-			"expr": expr,
-		}))
 		var hash uint64
-		if err := ch.ReadConn().QueryRow(chCtx,
-			"SELECT normalizedQueryHashKeepNames({expr:String})").Scan(&hash); err != nil {
+		if err := ch.ReadConn().QueryRow(context.Background(),
+			"SELECT normalizedQueryHashKeepNames(?)", expr).Scan(&hash); err != nil {
 			return 0, err
 		}
 		return hash, nil

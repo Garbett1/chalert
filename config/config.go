@@ -317,6 +317,13 @@ func readFiles(patterns []string) (map[string][]byte, error) {
 			return nil, fmt.Errorf("no files match pattern %q", pattern)
 		}
 		for _, path := range matches {
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to stat %q: %w", path, err)
+			}
+			if info.IsDir() {
+				continue
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read %q: %w", path, err)
