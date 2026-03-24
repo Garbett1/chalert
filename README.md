@@ -186,6 +186,27 @@ A separate read connection can be configured with `-clickhouse.read-dsn` to isol
 | Dependencies | prompb, remote write | clickhouse-go v2 native protocol |
 | Notification | Alertmanager v2 API | Alertmanager v2 API (same) |
 
+## Observability
+
+chalert exposes Prometheus metrics on the HTTP server (`-httpListenAddr`, default `:8880`):
+
+| Endpoint | Description |
+|---|---|
+| `/health` | Liveness probe (always 200 once started) |
+| `/ready` | Readiness probe (200 after all groups are running) |
+| `/metrics` | Prometheus metrics |
+| `/version` | Build version JSON |
+
+Key metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `chalert_rule_eval_duration_seconds` | histogram | Rule evaluation duration |
+| `chalert_rule_eval_errors_total` | counter | Rule evaluation errors |
+| `chalert_alerts_active` | gauge | Active alert instances per rule/state |
+| `chalert_notifier_sends_total` | counter | Notification send attempts by URL/result |
+| `chalert_config_reloads_total` | counter | Config reload attempts by result |
+
 ## Development
 
 ### Prerequisites
@@ -228,6 +249,40 @@ Validate rule files without connecting to ClickHouse:
 
 ```sh
 chalert -rule="rules/*.yaml" -dryRun
+```
+
+## Contributing
+
+### CI
+
+Every push and pull request to `main` runs the CI workflow:
+
+- `go vet` and `golangci-lint`
+- Unit tests with race detector
+- `go build`
+- `helm lint`
+
+### Releases
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please). The workflow:
+
+1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) messages:
+   - `feat: add new feature` — bumps minor version
+   - `fix: fix a bug` — bumps patch version
+   - `feat!: breaking change` or `BREAKING CHANGE:` footer — bumps major version
+   - `chore:`, `docs:`, `ci:`, `refactor:` etc. — no version bump
+2. release-please automatically creates/updates a **Release PR** with a changelog and version bumps
+3. When you merge the Release PR, release-please creates a git tag and GitHub Release
+4. That triggers the build pipeline: cross-compiled binaries, multi-arch Docker image pushed to GHCR, and Helm chart pushed to the OCI registry
+
+No manual tagging needed. Just write good commit messages and merge the Release PR when you're ready to ship.
+
+### Helm Chart
+
+The chart is published to `oci://ghcr.io/garbett1/charts/chalert` on each release. Install with:
+
+```sh
+helm install chalert oci://ghcr.io/garbett1/charts/chalert --version <version>
 ```
 
 ## License
