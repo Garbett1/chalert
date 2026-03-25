@@ -326,9 +326,10 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 	if len(toSend) > 0 {
 		var firing, resolved int
 		for _, a := range toSend {
-			if a.State == StateFiring {
+			switch a.State {
+			case StateFiring:
 				firing++
-			} else if a.State == StateInactive {
+			case StateInactive:
 				resolved++
 			}
 		}
