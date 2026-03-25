@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/Garbett1/chalert/compare/v0.3.0...v0.4.0) (2026-03-25)
+
+
+### Features
+
+* Add more logging to state transitions ([#3](https://github.com/Garbett1/chalert/issues/3)) ([4ab14df](https://github.com/Garbett1/chalert/commit/4ab14df4ba46dac991138c82f75c1964c77fd6a2))
+
 ## [0.3.0](https://github.com/Garbett1/chalert/compare/v0.2.0...v0.3.0) (2026-03-24)
 
 
