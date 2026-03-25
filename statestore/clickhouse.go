@@ -152,7 +152,11 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 		}
 	}
 
-	return batch.Send()
+	if err := batch.Send(); err != nil {
+		return err
+	}
+	slog.Info("chalert state saved", "count", len(instances), "database", s.database)
+	return nil
 }
 
 // LoadActive loads all Pending and Firing alert instances for restart recovery.
@@ -238,7 +242,11 @@ func (s *Store) RecordHistory(ctx context.Context, instances []rule.AlertInstanc
 		}
 	}
 
-	return batch.Send()
+	if err := batch.Send(); err != nil {
+		return err
+	}
+	slog.Info("chalert history recorded", "count", len(instances), "database", s.database)
+	return nil
 }
 
 func stateToEnum(s rule.AlertState) string {

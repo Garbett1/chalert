@@ -62,9 +62,7 @@ func (b *ClickHouseQuerierBuilder) BuildWithParams(params QuerierParams) Querier
 }
 
 func (q *ClickHouseQuerier) Query(ctx context.Context, expr string, ts time.Time) (Result, error) {
-	if q.debug {
-		slog.Info("chalert query", "expr", truncate(expr, 200), "ts", ts)
-	}
+	slog.Info("chalert query", "expr", truncate(expr, 200), "ts", ts)
 
 	start := time.Now()
 
@@ -82,11 +80,9 @@ func (q *ClickHouseQuerier) Query(ctx context.Context, expr string, ts time.Time
 		return Result{}, fmt.Errorf("mapping query results: %w", err)
 	}
 
-	if q.debug {
-		slog.Info("chalert query complete",
-			"results", len(metrics),
-			"duration", time.Since(start))
-	}
+	slog.Info("chalert query complete",
+		"results", len(metrics),
+		"duration", time.Since(start))
 
 	return Result{Data: metrics}, nil
 }
