@@ -84,6 +84,30 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 		return nil
 	}
 
+	var firing, resolved int
+	for _, a := range alerts {
+		switch a.State {
+		case rule.StateFiring:
+			firing++
+			slog.Info("chalert notifier: sending firing alert",
+				"alert", a.AlertName,
+				"group", a.GroupName,
+				"labels", a.Labels)
+		case rule.StateInactive:
+			resolved++
+			slog.Info("chalert notifier: sending resolution",
+				"alert", a.AlertName,
+				"group", a.GroupName,
+				"labels", a.Labels,
+				"resolved_at", a.ResolvedAt)
+		}
+	}
+	slog.Info("chalert notifier: pushing to alertmanager",
+		"total", len(alerts),
+		"firing", firing,
+		"resolved", resolved,
+		"targets", len(am.urls))
+
 	payload, err := am.buildPayload(alerts)
 	if err != nil {
 		return fmt.Errorf("building alertmanager payload: %w", err)
@@ -150,7 +174,7 @@ func (am *AlertManager) sendTo(ctx context.Context, url string, payload []byte) 
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	slog.Debug("chalert alerts sent", "url", url, "count", len(payload))
+	slog.Info("chalert alerts delivered", "url", url, "payload_bytes", len(payload))
 	return nil
 }
 

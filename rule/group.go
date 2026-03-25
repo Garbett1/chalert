@@ -169,13 +169,44 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) 
 			evalTS = ts.Add(-*g.EvalDelay)
 		}
 
+		evalStart := time.Now()
+		slog.Info("chalert group eval started",
+			"group", g.Name,
+			"rules", len(rules),
+			"eval_ts", evalTS)
+
 		allAlerts := g.execRules(ctx, rules, evalTS, concurrency, limit)
+
+		var firing, resolved int
+		for _, a := range allAlerts {
+			switch a.State {
+			case StateFiring:
+				firing++
+			case StateInactive:
+				resolved++
+			}
+		}
+		slog.Info("chalert group eval complete",
+			"group", g.Name,
+			"duration", time.Since(evalStart),
+			"alerts_to_send", len(allAlerts),
+			"firing", firing,
+			"resolved", resolved)
 
 		// Send notifications
 		if notifier != nil && len(allAlerts) > 0 {
+			slog.Info("chalert sending notifications",
+				"group", g.Name,
+				"firing", firing,
+				"resolved", resolved)
 			if err := notifier.Send(ctx, allAlerts); err != nil {
 				slog.Error("chalert notification failed",
 					"group", g.Name, "error", err)
+			} else {
+				slog.Info("chalert notifications sent successfully",
+					"group", g.Name,
+					"firing", firing,
+					"resolved", resolved)
 			}
 		}
 

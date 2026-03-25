@@ -221,13 +221,11 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 		return nil, fmt.Errorf("rule %q: query returned %d results, exceeding limit of %d", ar.name, len(res.Data), limit)
 	}
 
-	if ar.debug {
-		slog.Info("chalert rule eval",
-			"rule", ar.name,
-			"group", ar.groupName,
-			"samples", len(res.Data),
-			"duration", duration)
-	}
+	slog.Info("chalert rule eval",
+		"rule", ar.name,
+		"group", ar.groupName,
+		"samples", len(res.Data),
+		"duration", duration)
 
 	// Clean up resolved alerts past retention
 	for id, a := range ar.alerts {
@@ -324,7 +322,24 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 		return nil, fmt.Errorf("rule %q: exceeded limit of %d with %d active alerts", ar.name, limit, numActive)
 	}
 
-	return ar.alertsToSend(ts), nil
+	toSend := ar.alertsToSend(ts)
+	if len(toSend) > 0 {
+		var firing, resolved int
+		for _, a := range toSend {
+			if a.State == StateFiring {
+				firing++
+			} else if a.State == StateInactive {
+				resolved++
+			}
+		}
+		slog.Info("chalert rule alerts to send",
+			"rule", ar.name,
+			"group", ar.groupName,
+			"total", len(toSend),
+			"firing", firing,
+			"resolved", resolved)
+	}
+	return toSend, nil
 }
 
 // alertsToSend returns alerts that need to be sent to notifiers.
@@ -461,11 +476,8 @@ func hashLabels(labels map[string]string) uint64 {
 }
 
 func (ar *AlertingRule) logDebug(ts time.Time, a *AlertInstance, format string, args ...any) {
-	if !ar.debug {
-		return
-	}
 	msg := fmt.Sprintf(format, args...)
-	slog.Info("chalert rule debug",
+	slog.Info("chalert rule state",
 		"rule", ar.name,
 		"group", ar.groupName,
 		"alert_id", a.ID,
