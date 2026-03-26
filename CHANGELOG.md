@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/Garbett1/chalert/compare/v0.4.0...v0.4.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* sync chart versions with release manifest and fix release-please extra-files ([#5](https://github.com/Garbett1/chalert/issues/5)) ([7e98487](https://github.com/Garbett1/chalert/commit/7e9848793be8fcceb089401bc476d70a68c4dcb3))
+
 ## [0.4.0](https://github.com/Garbett1/chalert/compare/v0.3.0...v0.4.0) (2026-03-25)
 
 
