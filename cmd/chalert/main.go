@@ -235,6 +235,18 @@ func main() {
 		}()
 	}
 
+	// Inbuilt self-monitoring group: fires when chalert can't successfully
+	// evaluate any user rules. Kept out of ruleGroups so reload won't try
+	// to reconcile it against YAML.
+	selfMonGroup, selfMonQ := rule.BuildSelfMonGroup(*evaluationInterval, externalLabels)
+	selfMonQ.SetGroups(collectGroups(ruleGroups))
+	selfMonGroup.RestoreState(activeAlerts)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		selfMonGroup.Start(ctx, notify, store)
+	}()
+
 	httpSrv.SetReady(true)
 	slog.Info("chalert started",
 		"version", version,
@@ -262,6 +274,7 @@ func main() {
 				continue
 			}
 			reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
+			selfMonQ.SetGroups(collectGroups(ruleGroups))
 			metrics.ConfigReloads.WithLabelValues("success").Inc()
 			metrics.ConfigLastReloadSuccess.SetToCurrentTime()
 			slog.Info("rules reloaded", "groups", len(ruleGroups))
@@ -273,6 +286,7 @@ func main() {
 			for _, g := range ruleGroups {
 				g.Close()
 			}
+			selfMonGroup.Close()
 
 			// Wait for groups with a timeout to prevent hanging during rolling restarts.
 			done := make(chan struct{})
@@ -287,7 +301,7 @@ func main() {
 			}
 
 			// Final state persistence
-			persistAllState(context.Background(), ruleGroups, store)
+			persistAllState(context.Background(), ruleGroups, selfMonGroup, store)
 
 			// Shut down HTTP server
 			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -341,10 +355,15 @@ func reloadGroups(
 	}
 }
 
-func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store rule.StateStore) {
+func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, selfMon *rule.Group, store rule.StateStore) {
 	var all []rule.AlertInstance
 	for _, g := range groups {
 		for _, r := range g.Rules {
+			all = append(all, r.GetAlerts()...)
+		}
+	}
+	if selfMon != nil {
+		for _, r := range selfMon.Rules {
 			all = append(all, r.GetAlerts()...)
 		}
 	}
@@ -355,6 +374,16 @@ func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store r
 			slog.Info("persisted alert state", "count", len(all))
 		}
 	}
+}
+
+// collectGroups returns the values of ruleGroups as a slice, for passing
+// to the self-monitoring querier.
+func collectGroups(m map[uint64]*rule.Group) []*rule.Group {
+	out := make([]*rule.Group, 0, len(m))
+	for _, g := range m {
+		out = append(out, g)
+	}
+	return out
 }
 
 func countRules(groups []config.Group) int {
